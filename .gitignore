@@ -44,11 +44,15 @@ usage_statistics_webtalk.html
 *.vvp
 sobel_sim
 conv_sim
+layer_sim
+feat_sim
 mac_sim
 *.vcd
 
 # Simulation output (results/sim_out_3a.hex is kept on purpose)
 sim/sim_out.hex
+sim/sim_features.hex
+features.png
 hardware.png
 
 # Python

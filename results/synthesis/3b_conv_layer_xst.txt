@@ -1,0 +1,90 @@
+Stage 3b: feature_stream = line buffer + 3x3 window + conv_layer (4 filters x 9 taps, two runtime weight banks)
+Xilinx ISE 14.7, XST P.20131013 (lin64), target xc6vlx240t-1-ff1156, top = feature_stream (IMG_W = 640)
+Excerpts of two XST synthesis reports (feature_stream.syr). Estimates only, before place-and-route.
+
+=========================================================================
+VERSION 1: weight banks written as arrays   reg [7:0] wA [0:35], wB [0:35]
+=========================================================================
+Warnings: 6, including Xst:3035 "Index value(s) does not match array range for signal <wA>/<wB>"
+(w_addr is 6 bits, the arrays end at 35).
+
+INFO:Xst:3231 - The small RAM <Mram_wA..>/<Mram_wB..> will be implemented on LUTs ...
+  -> 72 separate 36x8-bit distributed RAMs: every tap reads its own weight (36 read ports per bank),
+     and XST built one RAM copy per read port.
+
+Advanced HDL Synthesis Report
+# RAMs                                                 : 73
+ 1024x16-bit dual-port block RAM                       : 1
+ 36x8-bit dual-port distributed RAM                    : 72
+# MACs                                                 : 36
+ 9x8-to-20-bit MAC                                     : 36
+
+Primitive usage: RAM64M 144, RAM64X1D 144, RAMB18E1 1, SRLC16E 48, DSP48E1 36
+
+Device utilization summary:
+ Number of Slice Registers:             198
+ Number of Slice LUTs:                 1238
+    Number used as Logic:               326
+    Number used as Memory:              912
+       Number used as RAM:              864
+       Number used as SRL:               48
+ Number of bonded IOBs:                 109
+ Number of Block RAM/FIFO:                1
+ Number of DSP48E1s:                     36  out of    768     4%
+
+Timing Summary:
+   Minimum period: 2.938ns (Maximum Frequency: 340.368MHz)
+Critical path:
+     RAM64M:WCLK->DOC           1.668   0.491  layer/Mram_wA82           (weight LUT-RAM read)
+     LUT3:I1->O                 0.068   0.399  bank-select mux
+     DSP48E1:A5                 0.312          filt[0].tap[8] DSP input
+    Total                       2.938ns
+
+=========================================================================
+VERSION 2 (current): weight banks written as registers   reg [287:0] wA, wB  (weight a = wA[8*a +: 8])
+=========================================================================
+Warnings: 4 (HDLCompiler:413 x2 counter wrap, Xst:2404 a_r<8> constant 0, Xst:2677 s1_row_0 trimmed). Errors: 0.
+
+HDL Synthesis: Found 1-bit register for signal <wA<287>> ... <wA<0>>, <wB<287>> ... <wB<0>>
+INFO Xst:2261: a_r (pixel input register) of each tap merged across the 4 filters;
+               the bank bit's delay chain shared between taps.
+
+Advanced HDL Synthesis Report
+# RAMs                                                 : 1
+ 1024x16-bit dual-port block RAM                       : 1
+# MACs                                                 : 36
+ 9x8-to-20-bit MAC                                     : 36   (m_r, pout absorbed into every DSP)
+# Multiplexers                                         : 36
+ 8-bit 2-to-1 multiplexer                              : 36   (bank select per tap)
+
+Final Register Report
+# Registers                                            : 726
+# Shift Registers                                      : 48   (skew, taps 3-8, 8 bits each)
+
+Device utilization summary:
+ Number of Slice Registers:             774  out of  301440     0%
+ Number of Slice LUTs:                  453  out of  150720     0%
+    Number used as Logic:               405
+    Number used as Memory:               48
+       Number used as SRL:               48
+ Number of unique control sets:          77   (one write enable per weight address)
+ Number of bonded IOBs:                 109  out of    600    18%
+ Number of Block RAM/FIFO:                1  out of    416     0%
+ Number of DSP48E1s:                     36  out of    768     4%
+
+Timing Summary:
+Speed Grade: -1
+   Minimum period: 2.739ns (Maximum Frequency: 365.097MHz)
+   Minimum input arrival time before clock: 2.245ns   (w_addr decode -> weight register enables)
+   Maximum output required time after clock: 0.896ns
+
+Critical path (line-buffer block RAM read feeding its own write port, 0 levels of logic):
+     RAMB18E1:CLKARDCLK->DOBDO7    2.073   0.405  Mram_lb (lb_q<7>)
+     RAMB18E1:DIADI15 setup        0.261
+    Total                          2.739ns
+
+Simulation (ISim 14.7 and Icarus Verilog 12):
+  tb_conv_layer:     PASS: 7527 (ISim) / 7523 (Icarus) windows x 4 filters matched the reference,
+                     ~155 bank switches and ~155 live bank rewrites ($random sequences differ per simulator)
+  tb_feature_stream: PASS: 5828 pixels x 4 filters matched the golden model
+                     (with mid-frame and mid-row bank switches)
