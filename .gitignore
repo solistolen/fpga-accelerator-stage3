@@ -1,0 +1,56 @@
+# Xilinx ISE / ISim generated files
+*.xise
+*.gise
+*.ngc
+*.ngd
+*.ngr
+*.ncd
+*.pcf
+*.bit
+*.bgn
+*.drc
+*.syr
+*.srp
+*.lso
+*.prj
+*.xst
+*.stx
+*.cmd_log
+*.wdb
+*.wcfg
+*.exe
+*.log
+*.html
+*.xrpt
+*.ptwx
+*.unroutes
+*.par
+*.twr
+*.twx
+*.map
+*.mrp
+*.ngm
+xst/
+_xmsgs/
+isim/
+iseconfig/
+xlnx_auto_0_xdb/
+_ngo/
+fuse*
+webtalk*
+usage_statistics_webtalk.html
+
+# Icarus Verilog
+*.vvp
+sobel_sim
+conv_sim
+mac_sim
+*.vcd
+
+# Simulation output (results/sim_out_3a.hex is kept on purpose)
+sim/sim_out.hex
+hardware.png
+
+# Python
+__pycache__/
+*.pyc

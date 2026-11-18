@@ -1,0 +1,76 @@
+Stage 3a: Sobel on the systolic conv3x3_sys engine (programmable, 11-clock pipeline) + pipelined magnitude
+Xilinx ISE 14.7, XST P.20131013 (lin64), target xc6vlx240t-1-ff1156, top = sobel (IMG_W = 640)
+Excerpt of the XST synthesis report (sobel.syr). Estimates only, before place-and-route.
+Warnings: 300, all expected: Xst:1710/1895 b_r coefficient registers constant (Sobel coefficients
+are localparams in sobel.v, so every coefficient bit is a constant), Xst:2404 a_r<8> constant 0
+(zero-extended pixel), HDLCompiler:413 x2 counter wrap, Xst:2677 s1_row_0 trimmed. Errors: 0.
+INFO Xst:2261 (hundreds): cy delay lines and a_r registers are equivalent to cx's and were merged,
+because both engines delay the same pixels.
+
+=========================================================================
+Advanced HDL Synthesis (per tap)
+
+sys_tap DELAY=0 (tap 0): Found pipelined multiplier ... 2 pipeline level(s) ... Pushing register(s)
+                         into the multiplier macro.            (m_r -> MREG, pout -> PREG)
+sys_tap DELAY=1..8:      Multiplier ... and adder/subtractor ... are combined into a MAC.
+                         The following registers are also absorbed by the MAC: <m_r>, <pout>.
+
+Advanced HDL Synthesis Report
+
+Macro Statistics
+# RAMs                                                 : 1
+ 1024x16-bit dual-port block RAM                       : 1
+# MACs                                                 : 16
+ 9x8-to-20-bit MAC                                     : 16
+# Multipliers                                          : 2
+ 9x8-bit registered multiplier                         : 2
+# Adders/Subtractors                                   : 3
+ 20-bit subtractor                                     : 2
+ 21-bit adder                                          : 1
+# Counters                                             : 2
+ 10-bit up counter                                     : 2
+
+Final Register Report
+# Registers                                            : 192
+ Flip-Flops                                            : 192
+# Shift Registers                                      : 86
+ 2-bit shift register                                  : 46   (gx_d/gy_d -> out_gx/out_gy, tap 3 skew)
+ 3-bit shift register                                  : 8    (tap 4 skew)
+ 4-bit shift register                                  : 8    (tap 5 skew)
+ 5-bit shift register                                  : 8    (tap 6 skew)
+ 6-bit shift register                                  : 8    (tap 7 skew)
+ 7-bit shift register                                  : 8    (tap 8 skew)
+
+=========================================================================
+Device utilization summary:
+
+Slice Logic Utilization:
+ Number of Slice Registers:             278  out of  301440     0%
+ Number of Slice LUTs:                  239  out of  150720     0%
+    Number used as Logic:               153  out of  150720     0%
+    Number used as Memory:               86  out of  58400     0%
+       Number used as SRL:               86
+
+Specific Feature Utilization:
+ Number of Block RAM/FIFO:                1  out of    416     0%
+    Number using Block RAM only:          1
+ Number of BUFG/BUFGCTRLs:                1  out of     32     3%
+ Number of DSP48E1s:                     18  out of    768     2%
+
+=========================================================================
+Timing Summary:
+Speed Grade: -1
+
+   Minimum period: 3.049ns (Maximum Frequency: 327.976MHz)
+   Minimum input arrival time before clock: 1.840ns
+   Maximum output required time after clock: 0.777ns
+
+Critical path (magnitude clock B in sobel.v - no longer inside the DSP chain):
+  Source:            gx_d_0 (FF)
+  Destination:       out_mag_0 (FF)
+    |gx|+|gy| add (12-bit carry chain) -> compare > 255 (LUT6) -> clamp (LUT6) -> out_mag
+    Total                      3.049ns (1.314ns logic, 1.735ns route)
+
+Simulation (ISim 14.7 and Icarus Verilog 12):
+  tb_conv_sys: PASS: 7500 windows matched the reference (latency 11)
+  tb_sobel:    PASS: 5828 edge pixels matched the golden model
