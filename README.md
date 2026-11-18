@@ -1,16 +1,18 @@
-# FPGA Accelerator, Stage 3: systolic convolution engines
+# FPGA Accelerator, Stage 3: from a systolic engine to a complete int8 CNN layer
 
 Stage 3 of a small image-processing accelerator in Verilog on a Xilinx Virtex-6 (ML605 board,
 XC6VLX240T). It turns the programmable 3x3 convolution engine from Stage 2 into a **systolic
-array**, the structure used by TPU-style neural-network accelerators (3a), and then into a small
-**convolution layer** with 4 filters and weights loaded at runtime (3b).
+array**, the structure used by TPU-style neural-network accelerators (3a), then into a small
+**convolution layer** with 4 filters and weights loaded at runtime (3b), and finally into a
+**complete int8 CNN layer** with bias, ReLU and requantization back to 8-bit pixels (3c).
 
-| | 3a: systolic Sobel | 3b: 4-filter conv layer |
-|---|---|---|
-| Filters / weights | 2, fixed | 4, runtime, two banks |
-| DSP48E1s | 18 | 36 |
-| Est. clock | 328 MHz | 365 MHz |
-| Simulation | PASS | PASS |
+| | 3a: systolic Sobel | 3b: 4-filter conv layer | 3c: complete CNN layer |
+|---|---|---|---|
+| Filters / weights | 2, fixed | 4, runtime, two banks | 4, runtime, two banks |
+| Output | 8-bit edge magnitude | 4 × 20-bit sums | 4 × 8-bit pixels (bias, ReLU, scale) |
+| DSP48E1s | 18 | 36 | 40 |
+| Est. clock | 328 MHz | 365 MHz | 365 MHz |
+| Simulation | PASS | PASS | PASS |
 
 Stages 1–2 (the MAC unit and the five Sobel edge-detector versions this work starts from) are in
 [fpga-accelerator-stage2](https://github.com/solistolen/fpga-accelerator-stage2).
@@ -170,6 +172,98 @@ bank" bug only showed up if no idle clock fell at the switch, so the stream test
 mid-row 16 times; and rewriting weights in ascending address order can never break the timing
 rule, so the unit test writes tap 8 first.
 
+## Stage 3c: bias, ReLU and requantization — a complete int8 CNN layer
+
+A CNN layer doesn't stop at the 20-bit convolution sums: it adds a bias, applies an activation, and
+scales the result back to 8 bits for the next layer. `requant` does that per filter:
+
+```
+s   = sum + bias                     bias: signed, per filter
+r   = max(s, 0)                      ReLU
+q   = round(r * mult / 2^shift)      mult: 16-bit unsigned, shift: 0..31  (scale = mult / 2^shift)
+out = min(q, 255)                    saturate to an unsigned 8-bit pixel
+```
+
+The scale is an integer multiply plus a shift, the way integer-only accelerators (and TensorFlow
+Lite's int8 kernels) apply scale factors. The output is the **same format as the input pixels**
+(0–255), so this layer's output could feed another layer. The parameters are double-banked like the
+weights: each pixel's bank bit selects both the weights and the bias/scale, and `feature_stream`
+now has an `out_bank` output (the window's bank delayed 11 clocks) so `requant` knows which bank
+each result used. `cnn_stream` is the whole layer: pixels in, 4 feature maps of 8-bit pixels out,
+19 clocks of latency.
+
+![CNN layer output](results/images/cnn_3c.png)
+
+*The layer's real 8-bit outputs, drawn as they are (no extra scaling). ReLU is visible in the first
+panel: Sobel Gx keeps only positive edges, so the rectangle's left edge is white and its right edge
+(a negative gradient) is cut to 0. Bias and scale put each map in a usable range; the Gaussian
+panel (scale 1/16) is just the blurred image.*
+
+| Bank | Filter | bias | mult | shift | scale |
+|---|---|---|---|---|---|
+| A | Sobel Gx, Sobel Gy | −20 | 24576 | 16 | 0.375 |
+| A | Laplacian | 0 | 49152 | 15 | 1.5 |
+| A | Gaussian | 0 | 4096 | 16 | 1/16 |
+| B | Diagonal | −10 | 16384 | 15 | 0.5 |
+| B | Emboss | 256 | 32768 | 17 | 0.25 |
+| B | Sharpen | 0 | 1 | 0 | 1 (no rounding) |
+| B | Extremes | 0 | 65535 | 24 | ≈0.0039 |
+
+Rewrite rule for the requant parameters (they're read when a window's sums reach `requant`):
+wait **12 clocks** after the last window that used a bank (8 for its weights).
+
+### Results: a control signal into a DSP's mode pins, again
+
+The first `requant` computed the rounding constant `(shift == 0) ? 0 : 2^(shift−1)` on the way into
+the add. XST put that add inside the scale DSP and handled the shift = 0 case by changing the
+**DSP's mode (OPMODE) every clock**, which needs ~1.9 ns of setup: the same kind of slow path as
+Stage 2a's `clr_r → OPMODE`. The fix registers the constant one stage earlier (`k3`), so the DSP
+always adds a register value (0 when shift = 0) and never changes mode. XST then put `k3` in the
+DSP's own C register.
+
+| | 3b (conv only) | 3c, first version | **3c, rounding constant registered (current)** |
+|---|---|---|---|
+| DSP48E1s | 36 | 40 ("Dynamic Mult/MultAdd") | 40 (plain MAC, `k3` absorbed) |
+| Slice LUTs | 453 | 1,216 | 1,261 |
+| Slice registers | 774 | 1,465 | 1,457 |
+| Bonded IOBs | 109 | 106 | 106 |
+| Slowest path | BRAM loop | shift amount → LUT → **DSP OPMODE** | BRAM loop |
+| Period | 2.74 ns | 3.55 ns | 2.74 ns |
+| **Est. clock** | **365 MHz** | **282 MHz** | **365 MHz** |
+| Latency (clocks) | 13 | 19 | 19 |
+
+The complete layer (convolution, bias, ReLU, requantization) runs as fast as the convolution
+alone. Most of the new LUTs are the per-filter 37-bit barrel shifters (`p4 >> shift`).
+
+Report excerpts for both versions: [`results/synthesis/3c_requant_xst.txt`](results/synthesis/3c_requant_xst.txt).
+
+### Verification
+
+- `tb_requant` (unit test, no data files): `PASS: 15042 x 4 outputs matched the reference (1558
+  bank switches, 1558 live rewrites; outputs 0: 31917, 1-254: 8729, 255: 19522)`. Sums over the
+  full 20-bit range, shift 0 and 31, mult 0 and 65535, extreme biases; the counts show ReLU-zero,
+  in-range and saturated outputs are all exercised.
+- `tb_cnn_stream`: `PASS: 5828 pixels x 4 filters matched the golden model (8-bit outputs after
+  bias, ReLU, requantization)`, against `gen_cnn.py`.
+- Both pass in ISim 14.7 too.
+
+Planted bugs:
+
+| Bug | tb_requant | tb_cnn_stream |
+|---|---|---|
+| No ReLU (negative sums wrap) | FAIL | FAIL |
+| No rounding (truncate) | FAIL | FAIL |
+| Rounding constant 2^shift instead of 2^(shift−1) | FAIL | FAIL |
+| Rounding constant taken one pipeline stage late | FAIL | FAIL |
+| Saturation misses 256–511 (they wrap) | FAIL | FAIL |
+| Bias treated as unsigned | FAIL | FAIL |
+| Shift amount taken one pipeline stage early | FAIL | FAIL |
+| Bank bit for requant not delayed | | FAIL |
+| Bank bit for requant delayed 10 instead of 11 clocks | | FAIL (27 errors) |
+
+The last row only shows up at bank switches; it's caught because the stream test switches banks
+mid-row 16 times (added in 3b after a single switch missed a similar bug).
+
 ## Repository layout
 
 ```
@@ -178,22 +272,29 @@ rtl/
                     sobel.v         streaming Sobel: line buffer, 3x3 window, 2 x conv3x3_sys, magnitude
   3b_conv_layer/    conv_layer.v    4 filters x 9 taps, two weight banks, shared skew; sys_mac (one DSP tap)
                     feature_stream.v  streaming top: line buffer, 3x3 window, conv_layer, per-pixel bank bit
+  3c_requant/       requant.v       bias + ReLU + scale + round + saturate, two parameter banks
+                    cnn_stream.v    top: feature_stream -> requant (the complete layer)
+                    feature_stream.v  3b's plus out_bank; conv_layer.v (same as 3b)
 sim/
   image.hex                         96x64 test image (all testbenches)
   tb_conv_sys.v                     3a unit testbench (no data files)
   tb_sobel.v, expected.txt          3a Sobel testbench + golden results
   tb_conv_layer.v                   3b unit testbench: live bank switches and rewrites (no data files)
   tb_feature_stream.v, weights.hex, features_expected.txt   3b stream testbench + weights + golden results
+  tb_requant.v                      3c unit testbench (no data files)
+  tb_cnn_stream.v, quant.hex, cnn_expected.txt   3c stream testbench + requant parameters + golden results
 scripts/
   gen_sobel.py      test image + golden Sobel model, writes image.hex / expected.txt
   gen_features.py   golden model for 3b (8 kernels, 2 banks), writes weights.hex / features_expected.txt
   show_result.py    sim_out.hex -> hardware.png (3a)
   show_features.py  sim_features.hex -> features.png (3b)
+  gen_cnn.py        golden model for 3c (3b + requant), writes quant.hex / cnn_expected.txt
+  show_cnn.py       sim_cnn.hex -> cnn.png (3c)
   png_util.py       tiny PNG writer (no dependencies)
 results/
-  synthesis/        XST report excerpts (3a; 3b both versions)
-  images/           input, expected, 3a edge images, 3b feature maps
-  sim_out_3a.hex, sim_features_3b.hex   raw simulation outputs
+  synthesis/        XST report excerpts (3a; 3b and 3c, both versions each)
+  images/           input, expected, 3a edge images, 3b feature maps, 3c CNN outputs
+  sim_out_3a.hex, sim_features_3b.hex, sim_cnn_3c.hex   raw simulation outputs
 ```
 
 ## Running it
@@ -207,8 +308,9 @@ Use one project per stage (the top modules differ).
    **Simulation**). Copy the data files into the project folder (no need to add them):
    - 3a: `tb_conv_sys.v`, `tb_sobel.v`; data `image.hex`, `expected.txt`
    - 3b: `tb_conv_layer.v`, `tb_feature_stream.v`; data `image.hex`, `weights.hex`, `features_expected.txt`
+   - 3c: `tb_requant.v`, `tb_cnn_stream.v`; data `image.hex`, `weights.hex`, `quant.hex`, `cnn_expected.txt`
 3. Simulation view → select a testbench → Simulate Behavioral Model → `run all`.
-4. Implementation view → top = `sobel` (3a) or `feature_stream` (3b) → Synthesize - XST.
+4. Implementation view → top = `sobel` (3a), `feature_stream` (3b) or `cnn_stream` (3c) → Synthesize - XST.
 
 ### Icarus Verilog (no Xilinx tools needed)
 
@@ -226,8 +328,10 @@ vvp layer_sim
 iverilog -o feat_sim tb_feature_stream.v ../rtl/3b_conv_layer/feature_stream.v ../rtl/3b_conv_layer/conv_layer.v
 vvp feat_sim
 python ../scripts/show_features.py    # sim_features.hex -> features.png
+
+iverilog -o rq_sim tb_requant.v ../rtl/3c_requant/requant.v
+vvp rq_sim
+iverilog -o cnn_sim tb_cnn_stream.v ../rtl/3c_requant/*.v
+vvp cnn_sim
+python ../scripts/show_cnn.py         # sim_cnn.hex -> cnn.png
 ```
-
-## Next
-
-- **3c**: CNN-style output stage: bias, ReLU and requantization back to 8 bits.

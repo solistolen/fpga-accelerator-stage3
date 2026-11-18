@@ -1,0 +1,75 @@
+Stage 3c: cnn_stream = feature_stream (line buffer, window, conv_layer: 4 filters x 9 taps)
+                       + requant (bias, ReLU, scale = mult / 2^shift, round, saturate to 8 bits)
+Xilinx ISE 14.7, XST P.20131013 (lin64), target xc6vlx240t-1-ff1156, top = cnn_stream (IMG_W = 640)
+Excerpts of two XST synthesis reports (cnn_stream.syr). Estimates only, before place-and-route.
+
+=========================================================================
+VERSION 1: rounding constant computed on the way into the add
+    p4 <= p3 + ((h3 == 0) ? 0 : (1 << (h3 - 1)));
+=========================================================================
+Advanced HDL Synthesis (requant, per filter):
+  Multiplier <Mmult_filt[f].r2_filt[f].m2> and adder <Madd_...add_32_OUT> are combined into a MAC.
+  The following registers are also absorbed by the MAC: <filt[f].p3>, <filt[f].p4>.
+Macro Statistics:
+  # MACs : 40
+    20x16-to-37-bit Dynamic Mult/MultAdd : 4     <- the DSP's mode changes at runtime
+    9x8-to-20-bit MAC                    : 36
+
+Device utilization summary:
+ Number of Slice Registers:            1465
+ Number of Slice LUTs:                 1216   (logic 1163, SRL 53)
+ Number of bonded IOBs:                 106
+ Number of Block RAM/FIFO:                1
+ Number of DSP48E1s:                     40  out of    768     5%
+
+Timing Summary:
+   Minimum period: 3.545ns (Maximum Frequency: 282.087MHz)
+Critical path:
+     FD:C->Q                    0.375   0.775  rq/filt[3].h3_4_1          (shift amount)
+     LUT5:I0->O                 0.068   0.405  "shift == 0?" / shift - 1
+     DSP48E1:OPMODE4 setup      1.922          scale-step DSP of filter 3
+    Total                       3.545ns
+
+=========================================================================
+VERSION 2 (current): rounding constant registered one stage earlier
+    k3 <= (h2 == 0) ? 0 : (1 << (h2 - 1));    p4 <= p3 + k3;
+=========================================================================
+Warnings: 4 (HDLCompiler:413 x2 counter wrap, Xst:2404 a_r<8> constant 0, Xst:2677 s1_row_0 trimmed). Errors: 0.
+
+Advanced HDL Synthesis (requant, per filter):
+  The following registers are also absorbed by the MAC: <filt[f].p3>, <filt[f].p4>, <filt[f].k3>.
+Macro Statistics:
+  # MACs : 40
+    20x16-to-37-bit MAC                  : 4     <- fixed mode; k3 sits in the DSP's C register
+    9x8-to-20-bit MAC                    : 36
+  # Logic shifters : 8 (37-bit; the barrel shifter q5 = p4 >> shift, and the 1 << shift for k3)
+
+Final Register Report
+  # Registers       : 1396
+  # Shift Registers : 61
+
+Device utilization summary:
+ Number of Slice Registers:            1457  out of  301440     0%
+ Number of Slice LUTs:                 1261  out of  150720     0%
+    Number used as Logic:              1200
+    Number used as SRL:                  61
+ Number of bonded IOBs:                 106  out of    600    17%
+ Number of Block RAM/FIFO:                1  out of    416     0%
+ Number of DSP48E1s:                     40  out of    768     5%
+
+Timing Summary:
+Speed Grade: -1
+   Minimum period: 2.739ns (Maximum Frequency: 365.097MHz)
+   Minimum input arrival time before clock: 2.245ns
+   Maximum output required time after clock: 0.777ns
+
+Critical path (line-buffer block RAM read feeding its own write port, same as 3b):
+     RAMB18E1:CLKARDCLK->DOBDO7    2.073   0.405  conv/Mram_lb (conv/lb_q<7>)
+     RAMB18E1:DIADI15 setup        0.261
+    Total                          2.739ns
+
+Simulation (both versions; ISim 14.7 and Icarus Verilog 12):
+  tb_requant:    PASS: 15001 (ISim) / 15042 (Icarus) x 4 outputs matched the reference,
+                 ~1550 bank switches and live rewrites; all of ReLU-zero, in-range and saturated outputs exercised
+  tb_cnn_stream: PASS: 5828 pixels x 4 filters matched the golden model
+                 (8-bit outputs after bias, ReLU, requantization)

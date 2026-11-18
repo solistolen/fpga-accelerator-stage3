@@ -46,12 +46,16 @@ sobel_sim
 conv_sim
 layer_sim
 feat_sim
+rq_sim
+cnn_sim
 mac_sim
 *.vcd
 
 # Simulation output (results/sim_out_3a.hex is kept on purpose)
 sim/sim_out.hex
 sim/sim_features.hex
+sim/sim_cnn.hex
+cnn.png
 features.png
 hardware.png
 
